@@ -5,21 +5,23 @@ from . import layers
 from . import models
 from . import interpret
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 # Expose key classes at the top level of the package
 from .layers import (
     TropicalDifferenceAggregator,
     GatedTropicalDifferenceAggregator,
     PairwiseDifferenceLayer,
-    CyclicTropicalDifferenceLayer
+    CyclicTropicalDifferenceLayer,
+    PrototypeLayer
 )
 from .models import (
     PairwiseDifferenceNet,
     GatedTropicalDifferenceNet,
     CyclicTropicalDifferenceNet,
     RUNEBlock,
-    InterpretableRuneNet
+    InterpretableRuneNet,
+    PrototypeRuneNet
 )
 from .interpret import (
     plot_linear_weights,
@@ -30,7 +32,9 @@ from .interpret import (
     analyze_tropical_dominance,
     plot_feature_interaction_graph,
     plot_final_layer_contributions,
-    trace_decision_path
+    trace_decision_path,
+    plot_prototypes_with_tsne,
+    analyze_prototype_prediction
 )
 from .utils import ste_modulo, STEModulo
 
@@ -40,12 +44,14 @@ __all__ = [
     "GatedTropicalDifferenceAggregator",
     "PairwiseDifferenceLayer",
     "CyclicTropicalDifferenceLayer",
+    "PrototypeLayer",
     # Models
     "PairwiseDifferenceNet",
     "GatedTropicalDifferenceNet",
     "CyclicTropicalDifferenceNet",
     "RUNEBlock",
     "InterpretableRuneNet",
+    "PrototypeRuneNet",
     # Interpretation
     "plot_linear_weights",
     "plot_pairwise_difference_weights",
@@ -56,6 +62,8 @@ __all__ = [
     "plot_feature_interaction_graph",
     "plot_final_layer_contributions",
     "trace_decision_path",
+    "plot_prototypes_with_tsne",
+    "analyze_prototype_prediction",
     # Utils
     "ste_modulo",
     "STEModulo",

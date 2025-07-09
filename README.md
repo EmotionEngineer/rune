@@ -8,127 +8,121 @@ This approach shifts the paradigm from opaque transformations, typical of standa
 
 ## Core Architectural Principles
 
-RUNE's interpretability stems from its unique building blocks, which can be stacked to create deep yet fully transparent models.
+RUNE's interpretability stems from its unique building blocks, which can be stacked to create deep yet transparent models.
 
-### `TropicalDifferenceAggregator`
-The core computational unit of RUNE. This layer aggregates weighted pairwise differences between features using a differentiable analogue of the `max` operation, known as log-sum-exp. This allows the model to learn which feature comparisons are most salient.
+-   **`TropicalDifferenceAggregator`**: The core computational unit. It aggregates weighted pairwise differences (`feature_i - feature_j`) using a differentiable analogue of the `max` operation. This allows the model to learn which feature comparisons are most salient for a decision.
+-   **`GatedTropicalDifferenceAggregator`**: Enhances the core unit by dynamically combining **tropical (max-like)** and **standard (mean-like)** aggregation using a learnable gate. This allows the model to choose between sparse, rule-based logic (`max`) and holistic, averaging logic (`mean`) for each feature.
+-   **`RUNEBlock`**: The primary component for building deep models. It is a residual block that preserves dimensionality, allowing for sequential stacking to create deep, fully-analyzable networks.
 
-**Mathematical Formulation:**
-For an input vector $\mathbf{x} \in \mathbb{R}^D$, each component $y_i$ of the output vector $\mathbf{y} \in \mathbb{R}^D$ is computed as:
+## Model Variants
 
-$$
-y_i = \tau \cdot \log \left( \sum_{j \neq i} \exp \left( \frac{(x_i - x_j)W_{ij} + B_{ij}}{\tau} \right) \right)
-$$
-
-where $\mathbf{W}, \mathbf{B} \in \mathbb{R}^{D \times D}$ are learnable weight and bias matrices, and $\tau$ is a temperature parameter that controls the smoothness of the `max` approximation. As $\tau \to 0$, this operation converges to $\max_{j \neq i}((x_i - x_j)W_{ij} + B_{ij})$.
-
-**Interpretability:** By analyzing the terms inside the exponent, one can identify the dominant difference $(x_i - x_j)$ that most significantly contributes to the output feature $y_i$. This forms the basis of a learned rule.
-
-### `GatedTropicalDifferenceAggregator`
-This layer enhances the `TropicalDifferenceAggregator` by dynamically combining two types of aggregation—**tropical (max-like)** and **standard (mean-like)**—using a learnable gate. This allows the model to choose between a sparse, rule-based logic (`max`) and a holistic, averaging logic (`mean`) for each feature.
-
-**Mathematical Formulation:**
-The output $\mathbf{h} \in \mathbb{R}^D$ is a convex combination of two branches:
-
-$$
-\mathbf{y}^{\text{tropical}} = \text{TropicalDifferenceAggregator}(\mathbf{x})
-$$
-
-$$
-y_i = \frac{1}{D-1} \sum_{j \neq i} (x_i - x_j)W_{ij}
-$$
-
-The combination is mediated by a sigmoid gate $\mathbf{g} = \sigma(\mathbf{\alpha})$, where $\mathbf{\alpha}$ is a learnable parameter vector:
-
-$$
-\mathbf{h} = \mathbf{g} \odot \mathbf{y}^{\text{tropical}} + (1 - \mathbf{g}) \odot \mathbf{y}^{\text{mean}}
-$$
-
-The final layer output is the concatenation $[\mathbf{x}, \mathbf{h}] \in \mathbb{R}^{2D}$.
-
-**Interpretability:** The gate values $\mathbf{g} \in [0, 1]^D$ explicitly quantify the model's preference for sparse, rule-based logic versus dense, averaging logic for each internal feature.
-
-### `RUNEBlock`
-The primary component for building deep models. It is a residual block that preserves dimensionality, allowing for sequential stacking.
-
-**Architecture:**
-1.  **Aggregation:** $h_{\text{agg}} = \text{GatedTropicalDifferenceAggregator}(x) \in \mathbb{R}^{2D}$.
-2.  **Projection:** A linear layer projects the aggregated features back to the original dimension: $h_{\text{proj}} = \text{Linear}(h_{\text{agg}}) \in \mathbb{R}^D$.
-3.  **Residual Connection:** The output is computed with a residual connection and layer normalization for stable training: $y = \text{LayerNorm}(x + \text{Dropout}(h_{\text{proj}}))$.
-
-**Interpretability:** Because the block is fully analyzable and preserves dimensions, stacking `RUNEBlock`s creates a deep network where the decision logic can be traced from input to output.
+The library provides several high-level model architectures:
 
 ### `InterpretableRuneNet`
-A complete, end-to-end deep neural network constructed from a sequence of `RUNEBlock`s. It intentionally avoids "black-box" MLP layers with non-decomposable activations (like ReLU), ensuring full model transparency.
+A complete, end-to-end deep neural network constructed from a sequence of `RUNEBlock`s. It intentionally avoids "black-box" MLP layers, ensuring full model transparency. This model serves as the base for specialized training techniques.
 
-**Architecture:**
-1.  **Input Projection:** A linear layer maps the input features to an internal embedding space: $h_0 = \text{Linear}_{\text{in}}(x)$.
-2.  **RUNE Block Stack:** A series of $L$ blocks refine the embeddings: $h_{l+1} = \text{RUNEBlock}_l(h_l)$.
-3.  **Output Head:** A final linear layer maps the refined embeddings to the target output: $y_{\text{out}} = \text{Linear}_{\text{out}}(h_L)$.
+-   **Regularized RUNE (Training Strategy)**: By adding an L1 penalty to the interaction weights during training, you can encourage sparsity, forcing the model to discover the simplest, most important rules. This is achieved by using the `model.get_regularization_loss()` method in your training loop.
+-   **Annealed RUNE (Training Strategy)**: The "softness" of the `max` operation is controlled by a temperature parameter, `tau`. By gradually decreasing `tau` during training (annealing), the model's logic becomes "harder" and more discrete, making it easier to extract definitive rules. This is supported by the `model.set_tau()` method.
+
+### `PrototypeRuneNet`
+A powerful architecture for **case-based reasoning**. It combines a `PrototypeLayer` with an `InterpretableRuneNet`.
+1.  The model learns a set of **prototypes**, which are "ideal" or representative examples for the task.
+2.  For any new input, it first calculates the distance to each of these prototypes.
+3.  This vector of distances is then fed into a RUNE network, which learns rules based on prototype similarities (e.g., "If the input is very similar to Prototype 3 but dissimilar to Prototype 5, predict Class A").
+
+This provides a highly intuitive, human-friendly explanation for predictions.
 
 ## Interpretation and Analysis Tools
 
 The `rune.interpret` module provides a suite of functions to deconstruct and visualize the model's logic.
 
--   **`plot_linear_weights`**: Visualizes the weights of any `nn.Linear` layer (e.g., the input projection) as a heatmap, revealing how input features are composed into internal concepts.
--   **`plot_gated_aggregator_gates`**: Displays the learned gate values from a `GatedTropicalDifferenceAggregator`, showing the model's preference for tropical (max) vs. mean logic.
--   **`plot_final_layer_contributions`**: For a given sample, it calculates and plots the contribution of each feature entering the final layer. Contribution is defined as `activation × weight`, showing which learned concepts were most influential.
--   **`trace_decision_path`**: The most powerful tool. It generates a step-by-step report for a single prediction, detailing:
-    -   The dominant comparison terms (`(x_i - x_j)`) inside each `RUNEBlock`.
-    -   The final layer features that had the largest impact on the score.
+-   **`plot_tropical_aggregator_params`**: Visualize the raw interaction weights (`W_ij`) in a RUNE block to see which feature comparisons are emphasized. Especially useful for `RegularizedRuneNet`.
+-   **`plot_gated_aggregator_gates`**: See whether the model prefers `max`-like or `mean`-like logic.
+-   **`plot_final_layer_contributions`**: Identify which high-level features learned by the RUNE stack were most influential for a specific prediction.
+-   **`trace_decision_path`**: Generate a step-by-step report for a single prediction, detailing the dominant comparison terms (`x_i - x_j`) inside each `RUNEBlock`.
+-   **`plot_prototypes_with_tsne` (for `PrototypeRuneNet`)**: Visualize the learned prototypes in the same 2D space as your data to see if the model has identified meaningful clusters.
+-   **`analyze_prototype_prediction` (for `PrototypeRuneNet`)**: For a single sample, identify the closest prototypes and get a feature-by-feature comparison, explaining the decision in terms of similarity to known cases.
 
 ## Installation
 
-The library requires `torch`, `matplotlib`, and `networkx`
+The library is currently available for installation directly from GitHub.
 
+First, install the required dependencies:
 ```bash
-# Install dependencies
-pip install torch matplotlib networkx
+pip install torch matplotlib networkx scikit-learn pandas seaborn
+```
 
-# Install RUNE directly from GitHub
+Then, install the `rune` package from this repository:
+```bash
 pip install git+https://github.com/EmotionEngineer/rune.git
 ```
 
-## Usage Example
+## Usage Example: Prototype-Based Reasoning
 
 ```python
 import torch
 import pprint
 import matplotlib.pyplot as plt
-from rune.models import InterpretableRuneNet
-from rune.interpret import trace_decision_path, plot_final_layer_contributions
+import pandas as pd
+from sklearn.datasets import load_wine
+from sklearn.preprocessing import StandardScaler
+from rune.models import PrototypeRuneNet
+from rune.interpret import analyze_prototype_prediction, plot_prototypes_with_tsne
 
-# 1. Define and load a pre-trained model
-model = InterpretableRuneNet(input_dim=8, output_dim=1, num_blocks=3, block_dim=32)
-# model.load_state_dict(torch.load("california_housing_rune.pt")) # Example
+# 1. Prepare data
+X_raw, y = load_wine(return_X_y=True)
+feature_names = load_wine().feature_names
+scaler = StandardScaler().fit(X_raw)
+X = scaler.transform(X_raw)
+
+# 2. Define and train a PrototypeRuneNet model (training loop omitted for brevity)
+model = PrototypeRuneNet(
+    input_dim=X.shape[1], 
+    output_dim=len(set(y)), 
+    num_prototypes=10,
+    num_blocks=2, 
+    block_dim=16
+)
+# model.load_state_dict(...) # Assume model is trained
 model.eval()
 
-# 2. Prepare an input sample for analysis
-x_sample = torch.randn(8) # Example sample
-feature_names = [f"Feature_{i}" for i in range(8)]
+# 3. Pick a sample to analyze
+x_sample = torch.tensor(X[5], dtype=torch.float32)
 
-# 3. Get the prediction
-prediction = model(x_sample.unsqueeze(0))
-print(f"Model prediction: {prediction.item():.4f}\n")
+# 4. Get a comprehensive, case-based explanation
+analysis = analyze_prototype_prediction(model, x_sample, feature_names=feature_names, top_k=1)
 
-# 4. Perform comprehensive interpretation
+# Print the analysis
+print(f"Model Prediction: Class {analysis['prediction']}")
+closest_proto_info = analysis['closest_prototypes'][0]
+print(f"Sample is most similar to Prototype {closest_proto_info['index']} (Distance: {closest_proto_info['distance']:.2f})")
+print("\nFeature Comparison:")
+# To display the styled DataFrame in environments like Jupyter:
+# from IPython.display import display
+# display(closest_proto_info['feature_comparison'])
+# For plain text output:
+print(closest_proto_info['feature_comparison'])
 
-# 4.1. Trace the full decision path from input to output
-print("--- Tracing the Full Decision Path ---")
-path_analysis = trace_decision_path(model, x_sample, top_k=2, feature_names=feature_names)
-pprint.pprint(path_analysis)
 
-# 4.2. Visualize feature contributions at the final layer
-print("\n--- Plotting Final Layer Feature Contributions ---")
-plt.figure(figsize=(12, 6))
-plot_final_layer_contributions(
-    model,
-    x_sample,
-    title="Contributions to Final Prediction"
-)
+# 5. Visualize all prototypes relative to the data
+plt.figure(figsize=(10, 8))
+plot_prototypes_with_tsne(model, X, y)
 plt.show()
-
 ```
+
+## Advanced Interpretation Concepts / Future Work
+
+RUNE's architecture enables novel, powerful interpretation methods beyond standard visualizations. The explicit modeling of pairwise relationships allows for deeper insights into model logic. Future research will focus on implementing:
+
+1.  **Dominant Logic Graph (DLG)**: Tracing the most influential `(x_i - x_j)` comparisons through the network to build a directed graph of the model's core logic.
+2.  **Multi-Level Rule Extraction (MLRE)**: Automatically translating the learned weights and low-temperature `max` operations into human-readable "IF-THEN" rules.
+3.  **Continuous Logical Attribution (CLA)**: A rigorous, gradient-based attribution method that assigns importance scores to *pairs* of features, offering more insight than single-feature methods like SHAP.
+4.  **Differentiable Logic-Tree Decomposition (DLTD)**: Transforming a trained RUNE model into a hierarchical, tree-like structure of interpretable decision splits.
+5.  **Causal-Logic Identification (CLI)**: Using interventional and counterfactual analysis on the pairwise comparisons to distinguish correlational patterns from more causally-plausible ones.
+6.  **Probabilistic Logic Interpretation (PLI)**: A Bayesian approach to place confidence intervals around the extracted rules, quantifying the model's certainty in its own logic.
+7.  **Interactive Logic Dashboard (ILLED)**: A user-facing dashboard for real-time "what-if" analysis, allowing users to tweak feature values and instantly see how it affects the chain of pairwise comparisons.
+
+These directions aim to move beyond "interpretable" and toward truly **understandable AI**.
 
 ## License
 

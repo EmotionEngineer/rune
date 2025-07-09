@@ -8,7 +8,8 @@ from rune.models import (
     GatedTropicalDifferenceNet,
     CyclicTropicalDifferenceNet,
     RUNEBlock,
-    InterpretableRuneNet
+    InterpretableRuneNet,
+    PrototypeRuneNet # New import
 )
 
 BATCH_SIZE = 3
@@ -17,6 +18,7 @@ OUTPUT_DIM = 2
 HIDDEN_DIMS = [16, 8]
 PROJ_DIM_MODEL = 12
 BLOCK_DIM = 32
+NUM_PROTOTYPES_MODEL = 16
 
 @pytest.fixture
 def sample_data():
@@ -122,3 +124,44 @@ def test_models_with_interpretable_head(model_class, sample_data):
     output = model(sample_data)
     assert output.shape == (BATCH_SIZE, OUTPUT_DIM)
     output.sum().backward() # And gradients flow
+
+def test_interpretable_rune_net_helpers(sample_data):
+    """Tests the set_tau and get_regularization_loss methods."""
+    model = InterpretableRuneNet(input_dim=INPUT_DIM, output_dim=OUTPUT_DIM, block_dim=BLOCK_DIM)
+    
+    # Test set_tau
+    initial_tau = model.rune_blocks[0].gated_agg.tropical_agg.tau.item()
+    new_tau = 0.5
+    model.set_tau(new_tau)
+    updated_tau = model.rune_blocks[0].gated_agg.tropical_agg.tau.item()
+    assert abs(updated_tau - new_tau) < 1e-6, "set_tau did not update temperature"
+    assert abs(initial_tau - updated_tau) > 1e-6, "tau value did not change"
+
+    # Test get_regularization_loss
+    reg_loss = model.get_regularization_loss()
+    assert isinstance(reg_loss, torch.Tensor)
+    assert reg_loss.item() >= 0.0, "Regularization loss should be non-negative"
+
+def test_prototype_rune_net(sample_data):
+    """Tests the full PrototypeRuneNet."""
+    model = PrototypeRuneNet(
+        input_dim=INPUT_DIM,
+        output_dim=OUTPUT_DIM,
+        num_prototypes=NUM_PROTOTYPES_MODEL,
+        block_dim=BLOCK_DIM
+    )
+    output = model(sample_data)
+    assert output.shape == (BATCH_SIZE, OUTPUT_DIM), "PrototypeRuneNet output shape mismatch"
+    
+    # Test gradient flow
+    output.sum().backward()
+    assert all(p.grad is not None for p in model.parameters() if p.requires_grad), "Grads missing in PrototypeRuneNet"
+
+    # Test helper method pass-through
+    new_tau = 0.99
+    model.set_tau(new_tau)
+    updated_tau = model.rune_net.rune_blocks[0].gated_agg.tropical_agg.tau.item()
+    assert abs(updated_tau - new_tau) < 1e-6, "set_tau did not pass through to inner rune_net"
+    
+    reg_loss = model.get_regularization_loss()
+    assert reg_loss.item() > 0.0, "get_regularization_loss did not pass through"

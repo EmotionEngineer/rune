@@ -6,13 +6,15 @@ from rune.layers import (
     TropicalDifferenceAggregator,
     GatedTropicalDifferenceAggregator,
     PairwiseDifferenceLayer,
-    CyclicTropicalDifferenceLayer
+    CyclicTropicalDifferenceLayer,
+    PrototypeLayer  # New import
 )
 from rune.utils import ste_modulo
 
 BATCH_SIZE = 4
 DIM = 5
 PROJ_DIM = 8
+NUM_PROTOTYPES = 10  # New constant
 
 @pytest.fixture
 def sample_input():
@@ -114,3 +116,23 @@ def test_cyclic_tropical_difference_layer_no_ste(sample_input_proj):
         print(f"Known issue with fmod and autograd if not using STE: {e}")
         # This might happen if all gradients through fmod become zero for some inputs
         pass
+
+def test_prototype_layer(sample_input):
+    """Tests the PrototypeLayer for correct output shape and parameter registration."""
+    input_dim = sample_input.shape[1]
+    layer = PrototypeLayer(input_dim=input_dim, num_prototypes=NUM_PROTOTYPES)
+    
+    # Check output dimension property
+    assert layer.output_dim == NUM_PROTOTYPES
+
+    # Check forward pass output shape
+    output = layer(sample_input)
+    assert output.shape == (BATCH_SIZE, NUM_PROTOTYPES), "PrototypeLayer output shape mismatch"
+    
+    # Check that prototypes are learnable parameters
+    assert isinstance(layer.prototypes, torch.nn.Parameter)
+    assert layer.prototypes.requires_grad
+    
+    # Check gradient flow
+    output.sum().backward()
+    assert layer.prototypes.grad is not None, "Gradients missing for prototypes"

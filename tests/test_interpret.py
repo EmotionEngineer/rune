@@ -3,8 +3,9 @@
 import torch
 import pytest
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') # Use a non-interactive backend to prevent plots from showing
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from rune.layers import (
     PairwiseDifferenceLayer,
@@ -15,7 +16,8 @@ from rune.layers import (
 from rune.models import (
     PairwiseDifferenceNet,
     GatedTropicalDifferenceNet,
-    InterpretableRuneNet
+    InterpretableRuneNet,
+    PrototypeRuneNet
 )
 from rune.interpret import (
     plot_pairwise_difference_weights,
@@ -25,7 +27,9 @@ from rune.interpret import (
     analyze_tropical_dominance,
     plot_feature_interaction_graph,
     plot_final_layer_contributions,
-    trace_decision_path
+    trace_decision_path,
+    plot_prototypes_with_tsne,
+    analyze_prototype_prediction
 )
 
 # Test constants
@@ -35,6 +39,7 @@ INPUT_DIM_CYCLIC = 5
 IRN_INPUT_DIM = 8
 IRN_BLOCK_DIM = 6
 IRN_OUTPUT_DIM = 1
+PROTO_NUM = 10
 
 @pytest.fixture
 def pdl_layer():
@@ -68,17 +73,26 @@ def pdn_interpretable():
     return PairwiseDifferenceNet(input_dim=DIM, output_dim=1, interpretable_head=True)
 
 @pytest.fixture
+def proto_rune_net():
+    """An instance of the PrototypeRuneNet."""
+    return PrototypeRuneNet(
+        input_dim=IRN_INPUT_DIM,
+        output_dim=IRN_OUTPUT_DIM,
+        num_prototypes=PROTO_NUM,
+        block_dim=IRN_BLOCK_DIM
+    )
+
+@pytest.fixture
 def x_sample_for_interpret():
     """A single data sample for interpretation functions."""
     return torch.randn(IRN_INPUT_DIM)
 
-# --- Original Plotting Tests (Unchanged) ---
 def test_plot_pairwise_difference_weights(pdl_layer):
     fig, ax = plt.subplots()
     plot_pairwise_difference_weights(pdl_layer, ax=ax)
     plt.close(fig)
     pdl_no_weights = PairwiseDifferenceLayer(input_dim=1)
-    plot_pairwise_difference_weights(pdl_no_weights)
+    plot_pairwise_difference_weights(pdl_no_weights) # Should print a message and not fail
 
 def test_plot_tropical_aggregator_params(tda_layer):
     fig, ax = plt.subplots()
@@ -118,7 +132,7 @@ def test_plot_feature_interaction_graph(pdn_interpretable):
     plt.close(fig)
 
 def test_plot_final_layer_contributions(irn_model, x_sample_for_interpret):
-    """Tests plotting contributions for the final layer."""
+    """Tests plotting contributions for the final layer of InterpretableRuneNet."""
     fig, ax = plt.subplots()
     plot_final_layer_contributions(irn_model, x_sample_for_interpret, ax=ax)
     plt.close(fig)
@@ -152,9 +166,8 @@ def test_trace_decision_path_full(irn_model, x_sample_for_interpret):
     assert len(final_pred_analysis['TopContributingFeatures'][0]) == 3
 
 def test_trace_decision_path_fallback(gtda_layer):
-    """Tests the fallback behavior of trace_decision_path on a simple layer."""
-    # Note: This tests a conceptual use case where a simple GatedTropicalDifferenceNet
-    # could be passed. We use the layer directly for simplicity here.
+    """Tests the fallback behavior of trace_decision_path on a simple layer-like object."""
+    # Create a mock model that has the necessary attributes for the fallback path
     model_like = torch.nn.Sequential(gtda_layer.tropical_agg)
     model_like.gated_tropical_agg = gtda_layer
     
@@ -166,3 +179,53 @@ def test_trace_decision_path_fallback(gtda_layer):
     # Checks that it correctly fell back to analyzing the tropical aggregator
     assert "Layer 0 (Tropical Aggregator)" in analysis
     assert len(analysis["Layer 0 (Tropical Aggregator)"]) == DIM
+
+def test_plot_prototypes_with_tsne(proto_rune_net):
+    """Tests the t-SNE plotting function for prototypes."""
+    try:
+        import sklearn
+        import seaborn
+    except ImportError:
+        pytest.skip("scikit-learn or seaborn not installed, skipping t-SNE plot test")
+    
+    X_data = torch.randn(50, IRN_INPUT_DIM).numpy()
+    y_data = torch.randint(0, 2, (50,)).numpy()
+    
+    fig, ax = plt.subplots()
+    plot_prototypes_with_tsne(proto_rune_net, X_data, y_data, ax=ax)
+    plt.close(fig)
+
+def test_analyze_prototype_prediction(proto_rune_net, x_sample_for_interpret):
+    """Tests the full analysis of a single prediction from PrototypeRuneNet."""
+    analysis = analyze_prototype_prediction(
+        proto_rune_net,
+        x_sample_for_interpret,
+        top_k=2
+    )
+    
+    assert isinstance(analysis, dict)
+    assert 'prediction' in analysis
+    assert 'distances' in analysis
+    assert 'closest_prototypes' in analysis
+    
+    assert isinstance(analysis['prediction'], float) # Single output model
+    assert analysis['distances'].shape == (proto_rune_net.prototype_layer.num_prototypes,)
+    assert len(analysis['closest_prototypes']) == 2
+    
+    first_proto_info = analysis['closest_prototypes'][0]
+    assert 'index' in first_proto_info
+    assert 'distance' in first_proto_info
+    assert 'feature_comparison' in first_proto_info
+    assert isinstance(first_proto_info['feature_comparison'], pd.DataFrame)
+
+def test_trace_decision_path_dispatcher_for_proto(proto_rune_net, x_sample_for_interpret):
+    """Tests that trace_decision_path correctly dispatches to prototype analysis."""
+    # trace_decision_path should recognize the model type and call analyze_prototype_prediction
+    analysis = trace_decision_path(proto_rune_net, x_sample_for_interpret, top_k=2)
+
+    # The result should be the same as calling analyze_prototype_prediction directly
+    assert isinstance(analysis, dict)
+    assert 'prediction' in analysis
+    assert 'closest_prototypes' in analysis
+    assert 'distances' in analysis
+    assert 'RUNEBlock_0' not in analysis # Make sure it didn't do the standard trace

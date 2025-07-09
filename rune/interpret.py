@@ -4,18 +4,29 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from .layers import (
     PairwiseDifferenceLayer,
     TropicalDifferenceAggregator,
     GatedTropicalDifferenceAggregator,
-    CyclicTropicalDifferenceLayer
+    CyclicTropicalDifferenceLayer,
+    PrototypeLayer
 )
+from .models import PrototypeRuneNet
 from .utils import get_feature_names
 
+# Optional imports for advanced visualizations
 try:
     import networkx as nx
 except ImportError:
     nx = None
+
+try:
+    from sklearn.manifold import TSNE
+    import seaborn as sns
+except ImportError:
+    TSNE = None
+    sns = None
 
 def plot_pairwise_difference_weights(
     layer: PairwiseDifferenceLayer,
@@ -334,6 +345,68 @@ def plot_final_layer_contributions(
     plt.tight_layout()
     return ax
 
+def analyze_tropical_dominance(
+    layer: TropicalDifferenceAggregator,
+    x_input: torch.Tensor,
+    top_k: int = 3,
+    feature_names: list[str] = None
+):
+    """
+    Analyzes which (x_i - x_j) terms dominate the log-sum-exp for a given input.
+    This is for a single batch item or an average over a batch.
+
+    Args:
+        layer: The TropicalDifferenceAggregator instance.
+        x_input: A single input sample (dim,) or a batch (batch_size, dim).
+                 If batch, results are averaged.
+        top_k: How many top contributing terms to show for each output dimension.
+        feature_names: Optional list of feature names.
+
+    Returns:
+        A dictionary where keys are output feature indices/names and values are
+        lists of (term_str, contribution_score) for the top_k terms.
+    """
+    if x_input.ndim == 1:
+        x_input = x_input.unsqueeze(0)
+    
+    B, D = x_input.shape
+    assert D == layer.dim, "Input dimension mismatch"
+
+    x_diff = x_input.unsqueeze(2) - x_input.unsqueeze(1)
+    weighted_diff = x_diff * layer.weights.unsqueeze(0).detach() + layer.bias.unsqueeze(0).detach()
+    
+    # Mask out diagonal
+    weighted_diff = weighted_diff.masked_fill(~layer.mask.unsqueeze(0), float('-inf'))
+    
+    # Contributions are terms inside exp before normalization by sum.
+    # Softmax essentially.
+    contributions = torch.softmax(weighted_diff / layer.tau.detach(), dim=2) # (B, D, D)
+    
+    if B > 1:
+        contributions = contributions.mean(dim=0) # Average over batch (D, D)
+    else:
+        contributions = contributions.squeeze(0) # (D, D)
+
+    if feature_names is None:
+        feature_names = get_feature_names(layer.dim, "x")
+
+    analysis = {}
+    for i in range(layer.dim): # For each output dimension y_i
+        # Get contributions to y_i from all (x_i - x_j)
+        scores, indices_j = torch.topk(contributions[i, :], k=top_k, dim=0)
+        
+        output_feature_name = feature_names[i]
+        analysis[output_feature_name] = []
+        for k_idx in range(scores.shape[0]):
+            j = indices_j[k_idx].item()
+            score = scores[k_idx].item()
+            if score < 1e-6 or i == j: # Negligible or masked
+                continue
+            term_str = f"({feature_names[i]} - {feature_names[j]})"
+            analysis[output_feature_name].append((term_str, score))
+            
+    return analysis
+
 def trace_decision_path(
     model: torch.nn.Module,
     x_sample: torch.Tensor,
@@ -341,11 +414,12 @@ def trace_decision_path(
     feature_names: list[str] = None
 ) -> dict:
     """
-    Traces the most influential terms through a stacked RUNE model for a
-    single prediction. Provides a step-by-step explanation.
+    Traces the most influential terms through a model for a single prediction,
+    providing a step-by-step explanation. Acts as a dispatcher for different
+    RUNE model types.
 
     Args:
-        model: An instance of InterpretableRuneNet.
+        model: An instance of InterpretableRuneNet or PrototypeRuneNet.
         x_sample: A single input sample (shape: [input_dim]).
         top_k: Number of top terms to report at each stage.
         feature_names: Names for the original input features.
@@ -353,6 +427,10 @@ def trace_decision_path(
     Returns:
         A dictionary containing the step-by-step analysis.
     """
+    if isinstance(model, PrototypeRuneNet):
+        print("Tracing decision path for PrototypeRuneNet. Analysis will be based on prototype distances.")
+        return analyze_prototype_prediction(model, x_sample.cpu(), top_k=top_k, feature_names=feature_names)
+
     if not hasattr(model, 'rune_blocks'):
         print("Warning: This function is designed for models with 'rune_blocks' like InterpretableRuneNet.")
         # Fallback for simpler models
@@ -417,64 +495,115 @@ def trace_decision_path(
 
     return path
 
-def analyze_tropical_dominance(
-    layer: TropicalDifferenceAggregator,
-    x_input: torch.Tensor,
-    top_k: int = 3,
-    feature_names: list[str] = None
-):
+def analyze_prototype_prediction(
+    model: PrototypeRuneNet,
+    x_sample: torch.Tensor,
+    feature_names: list[str] = None,
+    top_k: int = 3
+) -> dict:
     """
-    Analyzes which (x_i - x_j) terms dominate the log-sum-exp for a given input.
-    This is for a single batch item or an average over a batch.
+    Analyzes a single sample's prediction from a PrototypeRuneNet for case-based reasoning.
+
+    It identifies the most similar prototypes and compares their feature values
+    to the sample's feature values, providing an intuitive explanation.
 
     Args:
-        layer: The TropicalDifferenceAggregator instance.
-        x_input: A single input sample (dim,) or a batch (batch_size, dim).
-                 If batch, results are averaged.
-        top_k: How many top contributing terms to show for each output dimension.
-        feature_names: Optional list of feature names.
+        model: The trained PrototypeRuneNet instance.
+        x_sample: A single input sample tensor (shape: [input_dim]).
+        feature_names: Optional list of names for the original input features.
+        top_k: The number of closest prototypes to analyze.
 
     Returns:
-        A dictionary where keys are output feature indices/names and values are
-        lists of (term_str, contribution_score) for the top_k terms.
+        A dictionary containing the analysis, including:
+        - 'prediction': The model's predicted class for the sample.
+        - 'distances': A numpy array of distances to all prototypes.
+        - 'closest_prototypes': A list of dictionaries, one for each of the top_k
+          closest prototypes, containing their index, distance, and a DataFrame
+          comparing their features to the sample.
     """
-    if x_input.ndim == 1:
-        x_input = x_input.unsqueeze(0)
-    
-    B, D = x_input.shape
-    assert D == layer.dim, "Input dimension mismatch"
-
-    x_diff = x_input.unsqueeze(2) - x_input.unsqueeze(1)
-    weighted_diff = x_diff * layer.weights.unsqueeze(0).detach() + layer.bias.unsqueeze(0).detach()
-    
-    # Mask out diagonal
-    weighted_diff = weighted_diff.masked_fill(~layer.mask.unsqueeze(0), float('-inf'))
-    
-    # Contributions are terms inside exp before normalization by sum.
-    # Softmax essentially.
-    contributions = torch.softmax(weighted_diff / layer.tau.detach(), dim=2) # (B, D, D)
-    
-    if B > 1:
-        contributions = contributions.mean(dim=0) # Average over batch (D, D)
-    else:
-        contributions = contributions.squeeze(0) # (D, D)
-
+    model.to('cpu').eval()
     if feature_names is None:
-        feature_names = get_feature_names(layer.dim, "x")
+        feature_names = get_feature_names(x_sample.shape[0], "Feature_")
 
-    analysis = {}
-    for i in range(layer.dim): # For each output dimension y_i
-        # Get contributions to y_i from all (x_i - x_j)
-        scores, indices_j = torch.topk(contributions[i, :], k=top_k, dim=0)
+    sample_tensor = x_sample.unsqueeze(0)
+    with torch.no_grad():
+        distances = model.prototype_layer(sample_tensor).cpu().numpy().flatten()
+        output = model(sample_tensor)
+        # Handle both regression and classification outputs
+        if output.shape[1] > 1:
+            prediction = torch.argmax(output, dim=1).item()
+        else:
+            prediction = output.item()
+
+
+    closest_indices = np.argsort(distances)[:top_k]
+    
+    analysis = {
+        'prediction': prediction,
+        'distances': distances
+    }
+    
+    closest_prototypes_info = []
+    for idx in closest_indices:
+        prototype_features = model.prototype_layer.prototypes[idx].detach().cpu().numpy()
+        feature_df = pd.DataFrame({
+            'Feature': feature_names,
+            'Prototype_Value': prototype_features,
+            'Sample_Value': x_sample.cpu().numpy()
+        })
+        closest_prototypes_info.append({
+            'index': idx,
+            'distance': distances[idx],
+            'feature_comparison': feature_df
+        })
         
-        output_feature_name = feature_names[i]
-        analysis[output_feature_name] = []
-        for k_idx in range(scores.shape[0]):
-            j = indices_j[k_idx].item()
-            score = scores[k_idx].item()
-            if score < 1e-6 or i == j: # Negligible or masked
-                continue
-            term_str = f"({feature_names[i]} - {feature_names[j]})"
-            analysis[output_feature_name].append((term_str, score))
-            
+    analysis['closest_prototypes'] = closest_prototypes_info
     return analysis
+
+def plot_prototypes_with_tsne(
+    model: PrototypeRuneNet,
+    X_data: np.ndarray,
+    y_data: np.ndarray,
+    ax=None,
+    title: str = "t-SNE Visualization of Data and Learned Prototypes"
+):
+    """
+    Visualizes prototypes and data points in a 2D space using t-SNE.
+
+    Args:
+        model: The trained PrototypeRuneNet instance.
+        X_data: The input data samples (e.g., test set) as a NumPy array.
+        y_data: The corresponding labels for X_data.
+        ax: Optional matplotlib Axes object to plot on.
+        title: The plot title.
+    """
+    if TSNE is None or sns is None:
+        raise ImportError("Please install scikit-learn and seaborn: `pip install scikit-learn seaborn`")
+
+    model.to('cpu')
+    prototypes = model.prototype_layer.prototypes.detach().cpu().numpy()
+    
+    # Combine data and prototypes to project them into the same space
+    combined_data = np.vstack((X_data, prototypes))
+    
+    # Use t-SNE for dimensionality reduction
+    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(X_data)-1))
+    reduced_data = tsne.fit_transform(combined_data)
+    
+    # Split them back up
+    reduced_X = reduced_data[:len(X_data)]
+    reduced_prototypes = reduced_data[len(X_data):]
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(12, 9))
+
+    sns.scatterplot(x=reduced_X[:, 0], y=reduced_X[:, 1], hue=y_data, palette='viridis', alpha=0.6, ax=ax, legend='full')
+    ax.scatter(reduced_prototypes[:, 0], reduced_prototypes[:, 1], 
+               marker='X', s=250, c='red', edgecolors='black', linewidth=1.5, label='Prototypes')
+    
+    ax.set_title(title, fontsize=16)
+    ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
+    ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
+    ax.legend()
+    plt.tight_layout()
+    return ax
