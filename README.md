@@ -120,7 +120,7 @@ RUNE's architecture enables novel, powerful interpretation methods beyond standa
 4.  **Differentiable Logic-Tree Decomposition (DLTD)**: Transforming a trained RUNE model into a hierarchical, tree-like structure of interpretable decision splits.
 5.  **Causal-Logic Identification (CLI)**: Using interventional and counterfactual analysis on the pairwise comparisons to distinguish correlational patterns from more causally-plausible ones.
 6.  **Probabilistic Logic Interpretation (PLI)**: A Bayesian approach to place confidence intervals around the extracted rules, quantifying the model's certainty in its own logic.
-7.  **Interactive Logic Dashboard (ILLED)**: A user-facing dashboard for real-time "what-if" analysis, allowing users to tweak feature values and instantly see how it affects the chain of pairwise comparisons.
+7.  **Interactive Logic Learning & Explainability Dashboard (ILLED)**: A user-facing dashboard for real-time "what-if" analysis, allowing users to tweak feature values and instantly see how it affects the chain of pairwise comparisons.
 
 These directions aim to move beyond "interpretable" and toward truly **understandable AI**.
 
