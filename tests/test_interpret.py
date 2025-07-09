@@ -92,7 +92,7 @@ def test_plot_pairwise_difference_weights(pdl_layer):
     plot_pairwise_difference_weights(pdl_layer, ax=ax)
     plt.close(fig)
     pdl_no_weights = PairwiseDifferenceLayer(input_dim=1)
-    plot_pairwise_difference_weights(pdl_no_weights) # Should print a message and not fail
+    plot_pairwise_difference_weights(pdl_no_weights)
 
 def test_plot_tropical_aggregator_params(tda_layer):
     fig, ax = plt.subplots()
@@ -121,7 +121,6 @@ def test_analyze_tropical_dominance(tda_layer):
     assert len(analysis) == DIM
 
 def test_plot_feature_interaction_graph(pdn_interpretable):
-    """Tests the graph plotting function."""
     try:
         import networkx
     except ImportError:
@@ -132,13 +131,11 @@ def test_plot_feature_interaction_graph(pdn_interpretable):
     plt.close(fig)
 
 def test_plot_final_layer_contributions(irn_model, x_sample_for_interpret):
-    """Tests plotting contributions for the final layer of InterpretableRuneNet."""
     fig, ax = plt.subplots()
     plot_final_layer_contributions(irn_model, x_sample_for_interpret, ax=ax)
     plt.close(fig)
 
 def test_plot_final_layer_contributions_fallback(pdn_interpretable):
-    """Tests contribution plotting on a model with 'output_layer'."""
     x_sample = torch.randn(DIM)
     fig, ax = plt.subplots()
     plot_final_layer_contributions(pdn_interpretable, x_sample, ax=ax)
@@ -161,27 +158,20 @@ def test_trace_decision_path_full(irn_model, x_sample_for_interpret):
     
     final_pred_analysis = analysis['FinalPrediction']
     assert 'TopContributingFeatures' in final_pred_analysis
-    assert 'OverallScore' in final_pred_analysis
+    assert 'Score' in final_pred_analysis
     assert isinstance(final_pred_analysis['TopContributingFeatures'], list)
     assert len(final_pred_analysis['TopContributingFeatures'][0]) == 3
 
 def test_trace_decision_path_fallback(gtda_layer):
-    """Tests the fallback behavior of trace_decision_path on a simple layer-like object."""
-    # Create a mock model that has the necessary attributes for the fallback path
     model_like = torch.nn.Sequential(gtda_layer.tropical_agg)
     model_like.gated_tropical_agg = gtda_layer
-    
     x_sample = torch.randn(DIM)
-    # The function should print a warning but return a valid partial analysis
     analysis = trace_decision_path(model_like, x_sample)
-
     assert isinstance(analysis, dict)
-    # Checks that it correctly fell back to analyzing the tropical aggregator
     assert "Layer 0 (Tropical Aggregator)" in analysis
     assert len(analysis["Layer 0 (Tropical Aggregator)"]) == DIM
 
 def test_plot_prototypes_with_tsne(proto_rune_net):
-    """Tests the t-SNE plotting function for prototypes."""
     try:
         import sklearn
         import seaborn
@@ -208,8 +198,9 @@ def test_analyze_prototype_prediction(proto_rune_net, x_sample_for_interpret):
     assert 'distances' in analysis
     assert 'closest_prototypes' in analysis
     
-    assert isinstance(analysis['prediction'], float) # Single output model
-    assert analysis['distances'].shape == (proto_rune_net.prototype_layer.num_prototypes,)
+    assert isinstance(analysis['prediction'], float)
+    assert isinstance(analysis['distances'], list)
+    assert len(analysis['distances']) == proto_rune_net.prototype_layer.num_prototypes
     assert len(analysis['closest_prototypes']) == 2
     
     first_proto_info = analysis['closest_prototypes'][0]
@@ -220,12 +211,10 @@ def test_analyze_prototype_prediction(proto_rune_net, x_sample_for_interpret):
 
 def test_trace_decision_path_dispatcher_for_proto(proto_rune_net, x_sample_for_interpret):
     """Tests that trace_decision_path correctly dispatches to prototype analysis."""
-    # trace_decision_path should recognize the model type and call analyze_prototype_prediction
     analysis = trace_decision_path(proto_rune_net, x_sample_for_interpret, top_k=2)
 
-    # The result should be the same as calling analyze_prototype_prediction directly
     assert isinstance(analysis, dict)
     assert 'prediction' in analysis
     assert 'closest_prototypes' in analysis
     assert 'distances' in analysis
-    assert 'RUNEBlock_0' not in analysis # Make sure it didn't do the standard trace
+    assert 'RUNEBlock_0' not in analysis
