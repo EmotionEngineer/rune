@@ -145,32 +145,20 @@ def plot_final_layer_contributions(
     ax=None,
     title: str = "Final Layer Feature Contributions"
 ):
-    """
-    Analyzes and plots the contribution of each feature entering the final linear
-    layer to the output prediction for a single sample.
-    Handles both regression and classification models.
-    """
     model.eval()
-    if x_sample.dim() == 1:
-        x_sample = x_sample.unsqueeze(0)
-
-    # Find the final linear layer and the module that feeds into it
+    if x_sample.dim() == 1: x_sample = x_sample.unsqueeze(0)
     final_layer = None
     if hasattr(model, 'output_head'):
         final_layer = model.output_head
-        feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
+        feature_extractor = nn.Sequential(*list(model.children())[:-1])
     elif hasattr(model, 'output_layer'):
         final_layer = model.output_layer
-        feature_extractor = torch.nn.Sequential(*list(model.children())[:-1])
+        feature_extractor = nn.Sequential(*list(model.children())[:-1])
     else:
         raise ValueError("Could not find a final 'output_head' or 'output_layer'.")
-
-    # Get activations and determine the target class for analysis
     with torch.no_grad():
         activations = feature_extractor(x_sample).squeeze(0)
         final_logits = final_layer(activations.unsqueeze(0))
-        
-        # --- FIX: Handle multi-class output ---
         if final_layer.out_features > 1:
             predicted_class_idx = torch.argmax(final_logits, dim=1).item()
             weights = final_layer.weight[predicted_class_idx]
@@ -178,19 +166,14 @@ def plot_final_layer_contributions(
         else:
             weights = final_layer.weight.squeeze(0)
             plot_title = f"{title} for sample"
-
     contributions = activations * weights
-    
     if feature_names is None:
         feature_names = get_feature_names(len(contributions), "InterpretableFeat_")
-
     if ax is None:
         fig, ax = plt.subplots(figsize=(max(8, len(contributions) * 0.4), 6))
-
     contributions_np = contributions.detach().cpu().numpy()
     colors = ['g' if c > 0 else 'r' for c in contributions_np]
     ax.bar(range(len(contributions)), contributions_np, color=colors)
-
     ax.set_xticks(range(len(contributions)))
     ax.set_xticklabels(feature_names, rotation=45, ha="right")
     ax.set_ylabel("Contribution (Activation * Weight)")
@@ -221,7 +204,7 @@ def analyze_tropical_dominance(
         analysis[output_feature_name] = []
         for k_idx in range(scores.shape[0]):
             j = indices_j[k_idx].item()
-            score = scores[k_idx].item()
+            score = float(scores[k_idx].item())
             if score < 1e-6 or i == j: continue
             term_str = f"({feature_names[i]} - {feature_names[j]})"
             analysis[output_feature_name].append((term_str, score))
@@ -240,8 +223,7 @@ def trace_decision_path(
     if not hasattr(model, 'rune_blocks'):
         print("Warning: This function is designed for models with 'rune_blocks'.")
         if hasattr(model, 'gated_tropical_agg'):
-             agg_layer = model.gated_tropical_agg.tropical_agg
-             return {"Layer 0 (Tropical Aggregator)": analyze_tropical_dominance(agg_layer, x_sample, top_k, feature_names)}
+             return {"Layer 0 (Tropical Aggregator)": analyze_tropical_dominance(model.gated_tropical_agg.tropical_agg, x_sample, top_k, feature_names)}
         return {}
     
     model.eval()
@@ -249,8 +231,6 @@ def trace_decision_path(
     if feature_names is None: feature_names = get_feature_names(x_sample.shape[1], "Input_")
 
     path = {}
-    
-    # --- Step 1 & 2: Propagate through the network up to the final layer ---
     with torch.no_grad():
         h = model.input_projection(x_sample)
         proj_feature_names = get_feature_names(h.shape[1], "Proj_")
@@ -261,24 +241,21 @@ def trace_decision_path(
             dominance = analyze_tropical_dominance(block.gated_agg.tropical_agg, h, top_k, proj_feature_names)
             block_analysis['DominantTropicalTerms'] = dominance
             gate_values = block.gated_agg.gate_values.cpu().numpy()
-            block_analysis['GateValues'] = {f: g for f, g in zip(proj_feature_names, gate_values)}
+            block_analysis['GateValues'] = {f: float(g) for f, g in zip(proj_feature_names, gate_values)}
             h = block(h)
             path[f'RUNEBlock_{i}'] = block_analysis
 
-    # --- Step 3: Final Layer Contribution Analysis ---
     with torch.no_grad():
         final_logits = model.output_head(h)
         final_activations = h.squeeze(0).detach()
-
-        # --- FIX: Handle multi-class output ---
         if model.output_head.out_features > 1:
-            predicted_class_idx = torch.argmax(final_logits, dim=1).item()
+            predicted_class_idx = int(torch.argmax(final_logits, dim=1).item())
             final_weights = model.output_head.weight[predicted_class_idx].detach()
-            overall_score = final_logits.squeeze(0)[predicted_class_idx].item()
+            overall_score = float(final_logits.squeeze(0)[predicted_class_idx].item())
             prediction_info = {'PredictedClass': predicted_class_idx, 'Logit': overall_score}
         else:
             final_weights = model.output_head.weight.squeeze(0).detach()
-            overall_score = final_logits.item()
+            overall_score = float(final_logits.item())
             prediction_info = {'Score': overall_score}
 
     contributions = final_weights * final_activations
@@ -286,41 +263,32 @@ def trace_decision_path(
     
     final_analysis = []
     for val, idx in zip(top_contribs.values, top_contribs.indices):
-        idx = idx.item() # This is now safe
+        idx_item = idx.item()
         final_analysis.append({
-            'Feature': proj_feature_names[idx],
-            'Contribution': contributions[idx].item(),
-            'Reason': f"Activation={final_activations[idx]:.2f} * Weight={final_weights[idx]:.2f}"
+            'Feature': proj_feature_names[idx_item],
+            'Contribution': float(contributions[idx_item].item()),
+            'Reason': f"Activation={float(final_activations[idx_item].item()):.2f} * Weight={float(final_weights[idx_item].item()):.2f}"
         })
         
-    path['FinalPrediction'] = {
-        **prediction_info,
-        'TopContributingFeatures': final_analysis,
-    }
-
+    path['FinalPrediction'] = {**prediction_info, 'TopContributingFeatures': final_analysis}
     return path
 
 def analyze_prototype_prediction(
-    model: PrototypeRuneNet,
-    x_sample: torch.Tensor,
-    feature_names: list[str] = None,
-    top_k: int = 3
+    model: PrototypeRuneNet, x_sample: torch.Tensor, feature_names: list[str] = None, top_k: int = 3
 ) -> dict:
     model.to('cpu').eval()
-    if feature_names is None:
-        feature_names = get_feature_names(x_sample.shape[0], "Feature_")
-
+    if feature_names is None: feature_names = get_feature_names(x_sample.shape[0], "Feature_")
     sample_tensor = x_sample.unsqueeze(0)
     with torch.no_grad():
         distances = model.prototype_layer(sample_tensor).cpu().numpy().flatten()
         output = model(sample_tensor)
         if output.shape[1] > 1:
-            prediction = torch.argmax(output, dim=1).item()
+            prediction = int(torch.argmax(output, dim=1).item())
         else:
-            prediction = output.item()
+            prediction = float(output.item())
 
     closest_indices = np.argsort(distances)[:top_k]
-    analysis = {'prediction': prediction, 'distances': distances}
+    analysis = {'prediction': prediction, 'distances': distances.tolist()}
     
     closest_prototypes_info = []
     for idx in closest_indices:
@@ -331,19 +299,15 @@ def analyze_prototype_prediction(
             'Sample_Value': x_sample.cpu().numpy()
         })
         closest_prototypes_info.append({
-            'index': idx,
-            'distance': distances[idx],
+            'index': int(idx),
+            'distance': float(distances[idx]),
             'feature_comparison': feature_df
         })
     analysis['closest_prototypes'] = closest_prototypes_info
     return analysis
 
 def plot_prototypes_with_tsne(
-    model: PrototypeRuneNet,
-    X_data: np.ndarray,
-    y_data: np.ndarray,
-    ax=None,
-    title: str = "t-SNE Visualization of Data and Learned Prototypes"
+    model: PrototypeRuneNet, X_data: np.ndarray, y_data: np.ndarray, ax=None, title: str = "t-SNE Visualization of Data and Learned Prototypes"
 ):
     if TSNE is None or sns is None:
         raise ImportError("Please install scikit-learn and seaborn: `pip install scikit-learn seaborn`")
@@ -352,16 +316,11 @@ def plot_prototypes_with_tsne(
     combined_data = np.vstack((X_data, prototypes))
     tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(X_data)-1))
     reduced_data = tsne.fit_transform(combined_data)
-    reduced_X = reduced_data[:len(X_data)]
-    reduced_prototypes = reduced_data[len(X_data):]
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(12, 9))
+    reduced_X, reduced_prototypes = reduced_data[:len(X_data)], reduced_data[len(X_data):]
+    if ax is None: fig, ax = plt.subplots(figsize=(12, 9))
     sns.scatterplot(x=reduced_X[:, 0], y=reduced_X[:, 1], hue=y_data, palette='viridis', alpha=0.6, ax=ax, legend='full')
     ax.scatter(reduced_prototypes[:, 0], reduced_prototypes[:, 1], 
                marker='X', s=250, c='red', edgecolors='black', linewidth=1.5, label='Prototypes')
-    ax.set_title(title, fontsize=16)
-    ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
-    ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
-    ax.legend()
-    plt.tight_layout()
+    ax.set_title(title, fontsize=16); ax.set_xlabel("t-SNE Dimension 1"); ax.set_ylabel("t-SNE Dimension 2")
+    ax.legend(); plt.tight_layout()
     return ax
