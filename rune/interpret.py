@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -12,7 +13,7 @@ from .layers import (
     CyclicTropicalDifferenceLayer,
     PrototypeLayer
 )
-from .models import PrototypeRuneNet
+from .models import PrototypeRuneNet, InterpretableRuneNet, RUNEBlock
 from .utils import get_feature_names
 
 # Optional imports for advanced visualizations
@@ -54,9 +55,9 @@ def plot_tropical_aggregator_params(
     layer: TropicalDifferenceAggregator, param_type: str = "weights", feature_names: list[str] = None, ax=None, title: str = None
 ):
     if param_type == "weights":
-        data, default_title = layer.weights.detach().cpu().numpy(), "Tropical Aggregator Weights (W_ij for output y_i from x_i - x_j)"
+        data, default_title = layer.weights.detach().cpu().numpy(), "Tropical Aggregator Weights (W_ij)"
     elif param_type == "bias":
-        data, default_title = layer.bias.detach().cpu().numpy(), "Tropical Aggregator Biases (B_ij for output y_i from x_i - x_j)"
+        data, default_title = layer.bias.detach().cpu().numpy(), "Tropical Aggregator Biases (B_ij)"
     else:
         raise ValueError("param_type must be 'weights' or 'bias'")
     if title is None: title = default_title
@@ -65,7 +66,7 @@ def plot_tropical_aggregator_params(
     im = ax.imshow(data, cmap="viridis")
     ax.set_xticks(np.arange(layer.dim)); ax.set_yticks(np.arange(layer.dim))
     ax.set_xticklabels(feature_names, rotation=45, ha="right"); ax.set_yticklabels(feature_names)
-    ax.set_xlabel("Feature j (in x_i - x_j)"); ax.set_ylabel("Output Feature i (y_i)")
+    ax.set_xlabel("Feature j"); ax.set_ylabel("Output Feature i")
     ax.set_title(title)
     for i in range(layer.dim):
         for j in range(layer.dim):
@@ -148,7 +149,14 @@ def plot_final_layer_contributions(
     model.eval()
     if x_sample.dim() == 1: x_sample = x_sample.unsqueeze(0)
     final_layer = None
-    if hasattr(model, 'output_head'):
+    # Find the feature extractor and final layer
+    if isinstance(model, InterpretableRuneNet):
+        feature_extractor = nn.Sequential(model.input_projection, model.rune_blocks)
+        final_layer = model.output_head
+    elif isinstance(model, PrototypeRuneNet):
+        feature_extractor = nn.Sequential(model.prototype_layer, model.rune_net.input_projection, model.rune_net.rune_blocks)
+        final_layer = model.rune_net.output_head
+    elif hasattr(model, 'output_head'):
         final_layer = model.output_head
         feature_extractor = nn.Sequential(*list(model.children())[:-1])
     elif hasattr(model, 'output_layer'):
@@ -156,6 +164,7 @@ def plot_final_layer_contributions(
         feature_extractor = nn.Sequential(*list(model.children())[:-1])
     else:
         raise ValueError("Could not find a final 'output_head' or 'output_layer'.")
+
     with torch.no_grad():
         activations = feature_extractor(x_sample).squeeze(0)
         final_logits = final_layer(activations.unsqueeze(0))
@@ -188,15 +197,29 @@ def analyze_tropical_dominance(
     top_k: int = 3,
     feature_names: list[str] = None
 ):
+    # --- FIX: This function is now aware of interaction_type ---
     if x_input.ndim == 1: x_input = x_input.unsqueeze(0)
     B, D = x_input.shape
     assert D == layer.dim, "Input dimension mismatch"
-    x_diff = x_input.unsqueeze(2) - x_input.unsqueeze(1)
-    weighted_diff = x_diff * layer.weights.unsqueeze(0).detach() + layer.bias.unsqueeze(0).detach()
-    weighted_diff = weighted_diff.masked_fill(~layer.mask.unsqueeze(0), float('-inf'))
-    contributions = torch.softmax(weighted_diff / layer.tau.detach(), dim=2)
+
+    # Replicate the interaction calculation from the layer's forward pass
+    if layer.interaction_type == 'difference':
+        x_interactions = x_input.unsqueeze(2) - x_input.unsqueeze(1)
+    elif layer.interaction_type == 'log_ratio':
+        x_log = torch.log(x_input + layer.eps)
+        x_interactions = x_log.unsqueeze(2) - x_log.unsqueeze(1)
+    elif layer.interaction_type == 'ratio':
+        x_interactions = x_input.unsqueeze(2) / (x_input.unsqueeze(1) + layer.eps)
+    else: # Fallback
+        x_interactions = x_input.unsqueeze(2) - x_input.unsqueeze(1)
+
+    weighted_interactions = x_interactions * layer.weights.unsqueeze(0).detach() + layer.bias.unsqueeze(0).detach()
+    weighted_interactions = weighted_interactions.masked_fill(~layer.mask.unsqueeze(0), float('-inf'))
+    
+    contributions = torch.softmax(weighted_interactions / layer.tau.detach(), dim=2)
     contributions = contributions.mean(dim=0) if B > 1 else contributions.squeeze(0)
     if feature_names is None: feature_names = get_feature_names(layer.dim, "x")
+    
     analysis = {}
     for i in range(layer.dim):
         scores, indices_j = torch.topk(contributions[i, :], k=top_k, dim=0)
@@ -206,7 +229,17 @@ def analyze_tropical_dominance(
             j = indices_j[k_idx].item()
             score = float(scores[k_idx].item())
             if score < 1e-6 or i == j: continue
-            term_str = f"({feature_names[i]} - {feature_names[j]})"
+
+            # Format the term string based on interaction type
+            if layer.interaction_type == 'difference':
+                term_str = f"({feature_names[i]} - {feature_names[j]})"
+            elif layer.interaction_type == 'log_ratio':
+                term_str = f"(log({feature_names[i]}) - log({feature_names[j]}))"
+            elif layer.interaction_type == 'ratio':
+                term_str = f"({feature_names[i]} / {feature_names[j]})"
+            else:
+                term_str = f"({feature_names[i]} - {feature_names[j]})" # Fallback
+
             analysis[output_feature_name].append((term_str, score))
     return analysis
 
@@ -220,11 +253,15 @@ def trace_decision_path(
         print("Dispatching to `analyze_prototype_prediction` for PrototypeRuneNet.")
         return analyze_prototype_prediction(model, x_sample.cpu(), top_k=top_k, feature_names=feature_names)
 
-    if not hasattr(model, 'rune_blocks'):
-        print("Warning: This function is designed for models with 'rune_blocks'.")
-        if hasattr(model, 'gated_tropical_agg'):
-             return {"Layer 0 (Tropical Aggregator)": analyze_tropical_dominance(model.gated_tropical_agg.tropical_agg, x_sample, top_k, feature_names)}
-        return {}
+    if not isinstance(model, InterpretableRuneNet):
+         print("Warning: This function is optimized for InterpretableRuneNet. Results may be limited for other models.")
+         if hasattr(model, 'gated_tropical_agg'):
+             agg_layer = model.gated_tropical_agg.tropical_agg
+             h = x_sample
+             if agg_layer.interaction_type in ['log_ratio', 'ratio']:
+                 h = F.softplus(h)
+             return {"Layer 0 (Tropical Aggregator)": analyze_tropical_dominance(agg_layer, h, top_k, feature_names)}
+         return {}
     
     model.eval()
     if x_sample.dim() == 1: x_sample = x_sample.unsqueeze(0)
@@ -238,10 +275,20 @@ def trace_decision_path(
 
         for i, block in enumerate(model.rune_blocks):
             block_analysis = {}
-            dominance = analyze_tropical_dominance(block.gated_agg.tropical_agg, h, top_k, proj_feature_names)
+            
+            # --- FIX: Replicate the logic from RUNEBlock's forward pass before analysis ---
+            h_for_agg = h
+            interaction_type = block.gated_agg.tropical_agg.interaction_type
+            if interaction_type in ['log_ratio', 'ratio']:
+                h_for_agg = F.softplus(h)
+            
+            dominance = analyze_tropical_dominance(block.gated_agg.tropical_agg, h_for_agg, top_k, proj_feature_names)
+            
             block_analysis['DominantTropicalTerms'] = dominance
             gate_values = block.gated_agg.gate_values.cpu().numpy()
             block_analysis['GateValues'] = {f: float(g) for f, g in zip(proj_feature_names, gate_values)}
+            
+            # Propagate the original `h` through the block to get the next state
             h = block(h)
             path[f'RUNEBlock_{i}'] = block_analysis
 
@@ -259,7 +306,7 @@ def trace_decision_path(
             prediction_info = {'Score': overall_score}
 
     contributions = final_weights * final_activations
-    top_contribs = torch.topk(contributions.abs(), k=top_k)
+    top_contribs = torch.topk(contributions.abs(), k=min(top_k, len(contributions)))
     
     final_analysis = []
     for val, idx in zip(top_contribs.values, top_contribs.indices):
