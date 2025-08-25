@@ -5,7 +5,7 @@ from . import layers
 from . import models
 from . import interpret
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 
 # Expose key classes at the top level of the package
 from .layers import (

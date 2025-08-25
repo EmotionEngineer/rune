@@ -7,22 +7,34 @@ from .utils import ste_modulo
 
 class TropicalDifferenceAggregator(nn.Module):
     """
-    TropicalDifferenceAggregator: Aggregates weighted pairwise differences (x_i - x_j)
-    using a "soft" max-plus operation (log-sum-exp).
+    Aggregates weighted pairwise interactions using a "soft" max-plus operation.
+    Supports differences, log-ratios, or ratios of features.
+
+    Args:
+        dim (int): The dimension of the input and output features.
+        tau (float): The initial temperature for the log-sum-exp operation.
+        learn_tau (bool): Whether the temperature `tau` should be a learnable parameter.
+        interaction_type (str): Type of pairwise interaction. One of ['difference', 'log_ratio', 'ratio'].
+                                'log_ratio' and 'ratio' require positive inputs.
     """
     def __init__(self,
                  dim: int,
                  tau: float = 0.1,
-                 learn_tau: bool = False):
+                 learn_tau: bool = False,
+                 interaction_type: str = 'difference'):
         super().__init__()
         self.dim = dim
         self.weights = nn.Parameter(torch.randn(dim, dim) * 0.02)
         self.bias = nn.Parameter(torch.zeros(dim, dim))
 
+        if interaction_type not in ['difference', 'log_ratio', 'ratio']:
+            raise ValueError("interaction_type must be 'difference', 'log_ratio', or 'ratio'")
+        self.interaction_type = interaction_type
+        self.register_buffer('eps', torch.tensor(1e-8))
+
         if learn_tau:
             self.log_tau = nn.Parameter(torch.log(torch.tensor(tau, dtype=torch.float32)))
         else:
-            # Not registered as buffer to allow modification during annealing
             self.log_tau = torch.log(torch.tensor(tau, dtype=torch.float32))
 
         self.register_buffer('mask', ~torch.eye(dim, dtype=torch.bool))
@@ -43,27 +55,48 @@ class TropicalDifferenceAggregator(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, D = x.shape
         assert D == self.dim, f"Input dimension mismatch: expected {self.dim}, got {D}"
-        x_diff = x.unsqueeze(2) - x.unsqueeze(1)
-        weighted_diff = x_diff * self.weights.unsqueeze(0) + self.bias.unsqueeze(0)
-        weighted_diff = weighted_diff.masked_fill(~self.mask.unsqueeze(0), float('-inf'))
-        y = self.tau * torch.logsumexp(weighted_diff / self.tau, dim=2)
+
+        if self.interaction_type == 'difference':
+            x_interactions = x.unsqueeze(2) - x.unsqueeze(1)
+        elif self.interaction_type == 'log_ratio':
+            # log(a/b) = log(a) - log(b)
+            x_log = torch.log(x + self.eps)
+            x_interactions = x_log.unsqueeze(2) - x_log.unsqueeze(1)
+        elif self.interaction_type == 'ratio':
+            x_interactions = x.unsqueeze(2) / (x.unsqueeze(1) + self.eps)
+
+        weighted_interactions = x_interactions * self.weights.unsqueeze(0) + self.bias.unsqueeze(0)
+        weighted_interactions = weighted_interactions.masked_fill(~self.mask.unsqueeze(0), float('-inf'))
+        y = self.tau * torch.logsumexp(weighted_interactions / self.tau, dim=2)
         return y
 
 class GatedTropicalDifferenceAggregator(nn.Module):
     """
-    Combines tropical aggregation (max-like) and mean aggregation of pairwise
-    differences using a learnable gate.
+    Combines tropical (max-like) and mean aggregation of pairwise interactions
+    using a learnable gate.
+
+    Args:
+        dim (int): The dimension of the input features.
+        tau_tropical (float): Initial temperature for the tropical aggregator.
+        learn_tau_tropical (bool): Whether to learn the temperature.
+        interaction_type (str): Type of pairwise interaction. One of ['difference', 'log_ratio', 'ratio'].
     """
     def __init__(self,
                  dim: int,
                  tau_tropical: float = 0.2,
-                 learn_tau_tropical: bool = False):
+                 learn_tau_tropical: bool = False,
+                 interaction_type: str = 'difference'):
         super().__init__()
         self.dim = dim
-        self.tropical_agg = TropicalDifferenceAggregator(dim, tau=tau_tropical, learn_tau=learn_tau_tropical)
+        self.tropical_agg = TropicalDifferenceAggregator(
+            dim, tau=tau_tropical, learn_tau=learn_tau_tropical, interaction_type=interaction_type
+        )
         self.mean_weights = nn.Parameter(torch.randn(dim, dim) * 0.02)
         self.gate_params = nn.Parameter(torch.zeros(dim))
         self.register_buffer('mask', ~torch.eye(dim, dtype=torch.bool))
+        self.interaction_type = interaction_type
+        self.register_buffer('eps', torch.tensor(1e-8))
+
 
     def set_tau(self, new_tau: float):
         """Sets a new temperature tau for the internal tropical aggregator."""
@@ -77,11 +110,19 @@ class GatedTropicalDifferenceAggregator(nn.Module):
         B, D = x.shape
         assert D == self.dim, f"Input dimension mismatch: expected {self.dim}, got {D}"
         y_tropical = self.tropical_agg(x)
-        x_diff = x.unsqueeze(2) - x.unsqueeze(1)
-        weighted_mean_diff = x_diff * self.mean_weights.unsqueeze(0)
-        weighted_mean_diff = weighted_mean_diff.masked_fill(~self.mask.unsqueeze(0), 0.0)
+
+        if self.interaction_type == 'difference':
+            x_interactions = x.unsqueeze(2) - x.unsqueeze(1)
+        elif self.interaction_type == 'log_ratio':
+            x_log = torch.log(x + self.eps)
+            x_interactions = x_log.unsqueeze(2) - x_log.unsqueeze(1)
+        elif self.interaction_type == 'ratio':
+            x_interactions = x.unsqueeze(2) / (x.unsqueeze(1) + self.eps)
+            
+        weighted_mean_interactions = x_interactions * self.mean_weights.unsqueeze(0)
+        weighted_mean_interactions = weighted_mean_interactions.masked_fill(~self.mask.unsqueeze(0), 0.0)
         num_effective_elements = self.mask.sum(dim=1, dtype=torch.float32).clamp(min=1.0)
-        y_mean = weighted_mean_diff.sum(dim=2) / num_effective_elements.unsqueeze(0)
+        y_mean = weighted_mean_interactions.sum(dim=2) / num_effective_elements.unsqueeze(0)
         g = torch.sigmoid(self.gate_params).unsqueeze(0)
         y_combined = g * y_tropical + (1 - g) * y_mean
         return torch.cat([x, y_combined], dim=1)

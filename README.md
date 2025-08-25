@@ -10,9 +10,28 @@ This approach shifts the paradigm from opaque transformations, typical of standa
 
 RUNE's interpretability stems from its unique building blocks, which can be stacked to create deep yet transparent models.
 
--   **`TropicalDifferenceAggregator`**: The core computational unit. It aggregates weighted pairwise differences (`feature_i - feature_j`) using a differentiable analogue of the `max` operation. This allows the model to learn which feature comparisons are most salient for a decision.
+-   **`TropicalDifferenceAggregator`**: The core computational unit. It aggregates weighted pairwise interactions (`feature_i - feature_j`) using a differentiable analogue of the `max` operation. This allows the model to learn which feature comparisons are most salient for a decision.
 -   **`GatedTropicalDifferenceAggregator`**: Enhances the core unit by dynamically combining **tropical (max-like)** and **standard (mean-like)** aggregation using a learnable gate. This allows the model to choose between sparse, rule-based logic (`max`) and holistic, averaging logic (`mean`) for each feature.
 -   **`RUNEBlock`**: The primary component for building deep models. It is a residual block that preserves dimensionality, allowing for sequential stacking to create deep, fully-analyzable networks.
+
+### New in RUNE: Interaction Types (Differences vs. Ratios)
+
+To better model relationships in domains like finance or economics, RUNE now supports different types of pairwise feature interactions. This is controlled by the `interaction_type` parameter in `InterpretableRuneNet` and its components.
+
+-   **`'difference'` (Default)**: The standard operation `(x_i - x_j)`. Useful for absolute comparisons.
+-   **`'log_ratio'`**: Computes interactions as `log(x_i / x_j)`, which is equivalent to `log(x_i) - log(x_j)`. This is highly effective for scale-invariant comparisons and is often more numerically stable than direct ratios. For example, comparing `log(income / debt_payment)` is a standard practice in credit scoring.
+-   **`'ratio'`**: Computes interactions as `x_i / x_j`.
+
+**Note**: When using `'log_ratio'` or `'ratio'`, ensure your input features are strictly positive to avoid mathematical errors like `log(0)` or division by zero.
+
+```python
+# Example: Building a model that learns rules based on log-ratios of features
+model = InterpretableRuneNet(
+    input_dim=10, 
+    output_dim=1, 
+    interaction_type='log_ratio' # Key change here!
+)
+```
 
 ## Model Variants
 
@@ -28,7 +47,7 @@ A complete, end-to-end deep neural network constructed from a sequence of `RUNEB
 A powerful architecture for **case-based reasoning**. It combines a `PrototypeLayer` with an `InterpretableRuneNet`.
 1.  The model learns a set of **prototypes**, which are "ideal" or representative examples for the task.
 2.  For any new input, it first calculates the distance to each of these prototypes.
-3.  This vector of distances is then fed into a RUNE network, which learns rules based on prototype similarities (e.g., "If the input is very similar to Prototype 3 but dissimilar to Prototype 5, predict Class A").
+3.  This vector of distances is then fed into a RUNE network, which learns rules based on prototype similarities (e.g., "If the input is very similar to Prototype 3 but dissimilar to Prototype 5, predict Class A"). Since distances are always positive, this is a great use case for `interaction_type='log_ratio'`.
 
 This provides a highly intuitive, human-friendly explanation for predictions.
 
@@ -39,7 +58,7 @@ The `rune.interpret` module provides a suite of functions to deconstruct and vis
 -   **`plot_tropical_aggregator_params`**: Visualize the raw interaction weights (`W_ij`) in a RUNE block to see which feature comparisons are emphasized. Especially useful for `RegularizedRuneNet`.
 -   **`plot_gated_aggregator_gates`**: See whether the model prefers `max`-like or `mean`-like logic.
 -   **`plot_final_layer_contributions`**: Identify which high-level features learned by the RUNE stack were most influential for a specific prediction.
--   **`trace_decision_path`**: Generate a step-by-step report for a single prediction, detailing the dominant comparison terms (`x_i - x_j`) inside each `RUNEBlock`.
+-   **`trace_decision_path`**: Generate a step-by-step report for a single prediction, detailing the dominant comparison terms (`x_i - x_j`, `log(x_i/x_j)`, etc.) inside each `RUNEBlock`.
 -   **`plot_prototypes_with_tsne` (for `PrototypeRuneNet`)**: Visualize the learned prototypes in the same 2D space as your data to see if the model has identified meaningful clusters.
 -   **`analyze_prototype_prediction` (for `PrototypeRuneNet`)**: For a single sample, identify the closest prototypes and get a feature-by-feature comparison, explaining the decision in terms of similarity to known cases.
 
@@ -74,6 +93,8 @@ X_raw, y = load_wine(return_X_y=True)
 feature_names = load_wine().feature_names
 scaler = StandardScaler().fit(X_raw)
 X = scaler.transform(X_raw)
+# For ratio-based models, ensure data is positive if necessary
+# For this example, we use the default 'difference' interaction
 
 # 2. Define and train a PrototypeRuneNet model (training loop omitted for brevity)
 model = PrototypeRuneNet(
@@ -81,7 +102,8 @@ model = PrototypeRuneNet(
     output_dim=len(set(y)), 
     num_prototypes=10,
     num_blocks=2, 
-    block_dim=16
+    block_dim=16,
+    interaction_type='log_ratio' # Distances are positive, so log_ratio is a great choice
 )
 # model.load_state_dict(...) # Assume model is trained
 model.eval()

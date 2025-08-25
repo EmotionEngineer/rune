@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .layers import (
     PairwiseDifferenceLayer,
     GatedTropicalDifferenceAggregator,
@@ -12,17 +13,27 @@ from .layers import (
 class RUNEBlock(nn.Module):
     """
     A residual block built around the GatedTropicalDifferenceAggregator.
+
+    Args:
+        dim (int): The dimension of the input and output features.
+        tau_tropical (float): Initial temperature for the tropical aggregator.
+        learn_tau_tropical (bool): Whether to learn the temperature.
+        dropout_rate (float): Dropout rate.
+        interaction_type (str): Type of pairwise interaction for the aggregator.
     """
     def __init__(self,
                  dim: int,
                  tau_tropical: float = 0.2,
                  learn_tau_tropical: bool = False,
-                 dropout_rate: float = 0.1):
+                 dropout_rate: float = 0.1,
+                 interaction_type: str = 'difference'):
         super().__init__()
+        self.interaction_type = interaction_type # Store for the forward pass logic
         self.gated_agg = GatedTropicalDifferenceAggregator(
             dim=dim,
             tau_tropical=tau_tropical,
-            learn_tau_tropical=learn_tau_tropical
+            learn_tau_tropical=learn_tau_tropical,
+            interaction_type=interaction_type
         )
         self.projection = nn.Linear(2 * dim, dim)
         self.dropout = nn.Dropout(dropout_rate)
@@ -37,7 +48,14 @@ class RUNEBlock(nn.Module):
         return self.gated_agg.get_regularization_loss()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        aggregated_features = self.gated_agg(x)
+        h = x
+        if self.interaction_type in ['log_ratio', 'ratio']:
+            h = F.softplus(x)
+
+        # Use the safe tensor `h` for aggregation
+        aggregated_features = self.gated_agg(h)
+
+        # Use the original tensor `x` for the residual connection
         projected = self.projection(aggregated_features)
         return self.norm(x + self.dropout(projected))
 
@@ -54,29 +72,28 @@ class InterpretableRuneNet(nn.Module):
                  block_dim: int = 32,
                  tau_tropical: float = 0.2,
                  learn_tau_tropical: bool = False,
-                 dropout_rate: float = 0.1):
+                 dropout_rate: float = 0.1,
+                 interaction_type: str = 'difference'):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, block_dim)
-
-        # --- FIX: Changed ModuleList to Sequential ---
+        
         self.rune_blocks = nn.Sequential(
             *[RUNEBlock(
                 dim=block_dim,
                 tau_tropical=tau_tropical,
                 learn_tau_tropical=learn_tau_tropical,
-                dropout_rate=dropout_rate
+                dropout_rate=dropout_rate,
+                interaction_type=interaction_type
               ) for _ in range(num_blocks)]
         )
         
         self.output_head = nn.Linear(block_dim, output_dim)
 
     def set_tau(self, new_tau: float):
-        """Sets a new temperature tau for all RUNEBlocks. Used for annealing."""
         for block in self.rune_blocks:
             block.set_tau(new_tau)
             
     def get_regularization_loss(self) -> torch.Tensor:
-        """Calculates total L1 regularization loss from all RUNEBlocks."""
         reg_loss = 0.0
         for block in self.rune_blocks:
             reg_loss += block.get_regularization_loss()
@@ -84,8 +101,6 @@ class InterpretableRuneNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_projection(x)
-        # --- FIX: Simplified forward pass ---
-        # No longer need to manually iterate
         x = self.rune_blocks(x)
         x = self.output_head(x)
         return x
@@ -96,6 +111,15 @@ class PrototypeRuneNet(nn.Module):
     A network for case-based reasoning. It first computes the similarity of an
     input to a set of learnable prototypes and then processes these similarities
     with an InterpretableRuneNet.
+    
+    Args:
+        input_dim (int): Dimension of the input data.
+        output_dim (int): Dimension of the output.
+        num_prototypes (int): Number of prototypes to learn.
+        num_blocks (int): Number of RUNEBlocks in the subsequent network.
+        block_dim (int): Internal dimension of the RUNEBlocks.
+        **kwargs: Additional arguments passed to InterpretableRuneNet,
+                  including `interaction_type`.
     """
     def __init__(self,
                  input_dim: int,
