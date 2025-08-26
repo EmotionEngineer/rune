@@ -197,7 +197,6 @@ def analyze_tropical_dominance(
     top_k: int = 3,
     feature_names: list[str] = None
 ):
-    # --- FIX: This function is now aware of interaction_type ---
     if x_input.ndim == 1: x_input = x_input.unsqueeze(0)
     B, D = x_input.shape
     assert D == layer.dim, "Input dimension mismatch"
@@ -230,15 +229,14 @@ def analyze_tropical_dominance(
             score = float(scores[k_idx].item())
             if score < 1e-6 or i == j: continue
 
-            # Format the term string based on interaction type
             if layer.interaction_type == 'difference':
                 term_str = f"({feature_names[i]} - {feature_names[j]})"
             elif layer.interaction_type == 'log_ratio':
                 term_str = f"(log({feature_names[i]}) - log({feature_names[j]}))"
             elif layer.interaction_type == 'ratio':
                 term_str = f"({feature_names[i]} / {feature_names[j]})"
-            else:
-                term_str = f"({feature_names[i]} - {feature_names[j]})" # Fallback
+            else: # Fallback
+                term_str = f"({feature_names[i]} - {feature_names[j]})" 
 
             analysis[output_feature_name].append((term_str, score))
     return analysis
