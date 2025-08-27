@@ -273,8 +273,6 @@ def trace_decision_path(
 
         for i, block in enumerate(model.rune_blocks):
             block_analysis = {}
-            
-            # --- FIX: Replicate the logic from RUNEBlock's forward pass before analysis ---
             h_for_agg = h
             interaction_type = block.gated_agg.tropical_agg.interaction_type
             if interaction_type in ['log_ratio', 'ratio']:
